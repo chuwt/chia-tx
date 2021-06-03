@@ -3,7 +3,7 @@
 @Time :    2021/6/2 下午4:57
 @Author:  chuwt
 """
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 from blspy import G1Element
 
@@ -11,9 +11,24 @@ from chia.util.byte_types import hexstr_to_bytes
 from chia.util.bech32m import decode_puzzle_hash, encode_puzzle_hash
 from chia.consensus.coinbase import create_puzzlehash_for_pk
 from chia.types.blockchain_format.coin import Coin
-from chia.types.blockchain_format.program import Program
+from chia.types.blockchain_format.program import Program, SerializedProgram
 from chia.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import puzzle_for_pk
 from chia.types.blockchain_format.sized_bytes import bytes32
+from chia.util.ints import uint64
+from chia.types.coin_solution import CoinSolution
+from chia.util.hash import std_hash
+from chia.wallet.puzzles.puzzle_utils import (
+    make_assert_coin_announcement,
+    make_assert_puzzle_announcement,
+    make_assert_my_coin_id_condition,
+    make_assert_absolute_seconds_exceeds_condition,
+    make_create_coin_announcement,
+    make_create_puzzle_announcement,
+    make_create_coin_condition,
+    make_reserve_fee_condition,
+)
+from chia.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import solution_for_conditions
+from chia.wallet.puzzles.announcement import Announcement
 
 
 def generate_xch_address_from_pk(pk: str) -> str:
@@ -25,37 +40,97 @@ def puzzle_hash_to_xch_address(puzzle_hash: str) -> str:
 
 
 def xch_address_to_puzzle_hash(xch_address: str) -> str:
-    return "0x" + decode_puzzle_hash(xch_address).hex()
+    return decode_puzzle_hash(xch_address).hex()
 
 
-def create_unsigned_tx(from_pk: str, send_list: List[Dict], utxo: List, fee: int):
+def create_unsigned_tx(from_pk: str, to_address: str, amount: uint64,  fee: int, coins: List):
     """
-    from_pk
-    send_list
-    utxo
     """
     outputs = []
-    for to in send_list:
-        address = to.get("address", None)
-        if not address:
-            raise ValueError(f"Address is null in send list")
-        amount = to.get("amount", 0)
-        if amount <= 0:
-            raise ValueError(f"Amount must greater than 0")
-        # address to puzzle hash
-        puzzle_hash = xch_address_to_puzzle_hash(address)
 
-        outputs.append({"puzzle_hash": puzzle_hash, "amount": amount})
-    # 判断utxo的数量和发送的数量关系
-    coins = set([Coin.from_json_dict(coin_json) for coin_json in utxo])
+    if not to_address:
+        raise ValueError(f"Address is null in send list")
+    if amount <= 0:
+        raise ValueError(f"Amount must greater than 0")
+    # address to puzzle hash
+    puzzle_hash = xch_address_to_puzzle_hash(to_address)
+    puzzle_hash = hexstr_to_bytes(puzzle_hash)
+    total_amount = amount + fee
 
-    if sum([t.get("amount") for t in outputs]) + fee > sum([coin.amount for coin in coins]):
+    outputs.append({"puzzle_hash": puzzle_hash, "amount": amount})
+
+    # 余额判断
+    coins = set([Coin.from_json_dict(coin_json) for coin_json in coins])
+    spend_value = sum([coin.amount for coin in coins])
+    change = spend_value - total_amount
+    if change < 0:
         raise ValueError("Insufficient balance")
 
+    spends: List[CoinSolution] = []
     primary_announcement_hash: Optional[bytes32] = None
 
     for coin in coins:
         puzzle: Program = puzzle_for_pk(G1Element.from_bytes(hexstr_to_bytes(from_pk)))
+
+        if primary_announcement_hash is None:
+            primaries = [{"puzzlehash": puzzle_hash, "amount": amount}]
+            if change > 0:
+                # todo 获取puzzle hash
+                pass
+                # change_puzzle_hash: bytes32 = get_new_puzzlehash()
+                # primaries.append({"puzzlehash": change_puzzle_hash, "amount": change})
+            message_list: List[bytes32] = [c.name() for c in coins]
+            for primary in primaries:
+                message_list.append(Coin(coin.name(), primary["puzzlehash"], primary["amount"]).name())
+            message: bytes32 = std_hash(b"".join(message_list))
+            solution: Program = make_solution(primaries=primaries, fee=fee, coin_announcements=[message])
+            primary_announcement_hash = Announcement(coin.name(), message).name()
+        else:
+            solution = make_solution(coin_announcements_to_assert=[primary_announcement_hash])
+
+        spends.append(
+            CoinSolution(
+                coin, SerializedProgram.from_bytes(bytes(puzzle)), SerializedProgram.from_bytes(bytes(solution))
+            )
+        )
+    print(spends)
+    return spends
+
+
+def make_solution(
+    primaries: Optional[List[Dict[str, Any]]] = None,
+    min_time=0,
+    me=None,
+    coin_announcements: Optional[List[bytes32]] = None,
+    coin_announcements_to_assert: Optional[List[bytes32]] = None,
+    puzzle_announcements=None,
+    puzzle_announcements_to_assert=None,
+    fee=0,
+) -> Program:
+    assert fee >= 0
+    condition_list = []
+    if primaries:
+        for primary in primaries:
+            condition_list.append(make_create_coin_condition(primary["puzzlehash"], primary["amount"]))
+    if min_time > 0:
+        condition_list.append(make_assert_absolute_seconds_exceeds_condition(min_time))
+    if me:
+        condition_list.append(make_assert_my_coin_id_condition(me["id"]))
+    if fee:
+        condition_list.append(make_reserve_fee_condition(fee))
+    if coin_announcements:
+        for announcement in coin_announcements:
+            condition_list.append(make_create_coin_announcement(announcement))
+    if coin_announcements_to_assert:
+        for announcement_hash in coin_announcements_to_assert:
+            condition_list.append(make_assert_coin_announcement(announcement_hash))
+    if puzzle_announcements:
+        for announcement in puzzle_announcements:
+            condition_list.append(make_create_puzzle_announcement(announcement))
+    if puzzle_announcements_to_assert:
+        for announcement_hash in puzzle_announcements_to_assert:
+            condition_list.append(make_assert_puzzle_announcement(announcement_hash))
+    return solution_for_conditions(condition_list)
 
 
 if __name__ == "__main__":
@@ -78,3 +153,14 @@ if __name__ == "__main__":
           xch_address_to_puzzle_hash("xch1knrllhacj7j2m7xqt64klys3kfalewr5p94dg9cpxfygpr70secqdnnl9r"))
     print("xch_address:",
           puzzle_hash_to_xch_address("0xb4c7ffdfb897a4adf8c05eab6f9211b27bfcb874096ad417013248808fcf8670"))
+
+    create_unsigned_tx(
+        from_pk="900c653808c7a1227e65af3bd989bc88bf2a30b13531fb2d8159c9321b84379e4c66e5924adf044bf414f80a2def359f",
+        to_address="xch1avpafhgdnf4ze55th72y6xw4uuem8dugne8z8e8m86gkxnkhdczs7rtn9z",
+        amount=uint64(1750000000000),
+        fee=0,
+        coins=[{
+            'amount': 1750000000000,
+            'parent_coin_info': '0xe3b0c44298fc1c149afbf4c8996fb92400000000000000000000000000000001',
+            'puzzle_hash': '0xeb03d4dd0d9a6a2cd28bbf944d19d5e733b3b7889e4e23e4fb3e91634ed76e05'
+        }])

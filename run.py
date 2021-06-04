@@ -3,9 +3,15 @@
 @Time :    2021/6/2 下午4:57
 @Author:  chuwt
 """
-from typing import List, Dict, Optional, Any
+from typing import (
+    List,
+    Dict,
+    Optional,
+    Any,
+)
 
-from blspy import G1Element
+import time
+from blspy import G1Element, PrivateKey, G2Element, AugSchemeMPL
 
 from chia.util.byte_types import hexstr_to_bytes
 from chia.util.bech32m import decode_puzzle_hash, encode_puzzle_hash
@@ -14,7 +20,7 @@ from chia.types.blockchain_format.coin import Coin
 from chia.types.blockchain_format.program import Program, SerializedProgram
 from chia.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import puzzle_for_pk
 from chia.types.blockchain_format.sized_bytes import bytes32
-from chia.util.ints import uint64
+from chia.util.ints import uint64, uint32
 from chia.types.coin_solution import CoinSolution
 from chia.util.hash import std_hash
 from chia.wallet.puzzles.puzzle_utils import (
@@ -29,10 +35,20 @@ from chia.wallet.puzzles.puzzle_utils import (
 )
 from chia.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import solution_for_conditions
 from chia.wallet.puzzles.announcement import Announcement
+from chia.types.spend_bundle import SpendBundle
+from chia.wallet.sign_coin_solutions import sign_coin_solutions, unsigned_coin_solutions
+from chia.wallet.transaction_record import TransactionRecord
+from chia.wallet.util.transaction_type import TransactionType
+from chia.consensus.coinbase import DEFAULT_HIDDEN_PUZZLE_HASH
+from chia.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import calculate_synthetic_secret_key
 
 
 def generate_xch_address_from_pk(pk: str) -> str:
     return encode_puzzle_hash(create_puzzlehash_for_pk(G1Element.from_bytes(hexstr_to_bytes(pk))), "xch")
+
+
+def pk_str_to_puzzle_hash(pk: str) -> str:
+    return create_puzzlehash_for_pk(G1Element.from_bytes(hexstr_to_bytes(pk))).hex()
 
 
 def puzzle_hash_to_xch_address(puzzle_hash: str) -> str:
@@ -43,21 +59,109 @@ def xch_address_to_puzzle_hash(xch_address: str) -> str:
     return decode_puzzle_hash(xch_address).hex()
 
 
-def create_unsigned_tx(from_pk: str, to_address: str, amount: uint64,  fee: int, coins: List):
+def create_signed_tx(sk: str, to_address: str, amount: uint64,  fee: int, coins: List) -> TransactionRecord:
     """
+    创建签名后的交易
+    注意: 这里的utxo必须是sk作为私钥进行授权的，不然无法通过签名，
+    todo 当有输入的UTXO有剩余时，将UTXO重新倒入到sk中，暂未测试
+    :param sk: 私钥字符串, 这里的私钥是wallet和index生成的私钥
+    :param to_address: 转账地址
+    :param amount: 数量
+    :param fee: 手续费
+    :param coins: UTXO的输入
+    :return: 签名后的交易
     """
+    to_puzzle_hash = xch_address_to_puzzle_hash(to_address)
+
+    synthetic = calculate_synthetic_secret_key(PrivateKey.from_bytes(hexstr_to_bytes(sk)), DEFAULT_HIDDEN_PUZZLE_HASH)
+    print(synthetic)
+    pk = PrivateKey.from_bytes(hexstr_to_bytes(sk)).get_g1()
+
+    transaction = create_transaction(pk, to_puzzle_hash, amount, fee, coins)
+    spend_bundle: SpendBundle = sign_coin_solutions(
+        transaction,
+        synthetic,
+        bytes.fromhex("ccd5bb71183532bff220ba46c268991a3ff07eb358e8255a65c30a2dce0e5fbb"),
+        11000000000,
+    )
+    print(spend_bundle.to_json_dict())
+
+    return TransactionRecord(
+        confirmed_at_height=uint32(0),
+        created_at_time=uint64(int(time.time())),
+        to_puzzle_hash=hexstr_to_bytes(to_puzzle_hash),
+        amount=uint64(amount),
+        fee_amount=uint64(fee),
+        confirmed=False,
+        sent=uint32(0),
+        spend_bundle=spend_bundle,
+        additions=list(spend_bundle.additions()),
+        removals=list(spend_bundle.removals()),
+        wallet_id=uint32(1),
+        sent_to=[],
+        trade_id=None,
+        type=uint32(TransactionType.OUTGOING_TX.value),
+        name=spend_bundle.name(),
+    )
+
+
+def sign_tx(sk: str, msg_list: List[bytes], pk_list: List[bytes]) -> G2Element:
+    """
+
+    :param sk: 是wallet的私钥
+    :param msg_list: create_unsigned_tx生成的
+    :param pk_list: create_unsigned_tx生成的
+    :return:
+    """
+    synthetic = calculate_synthetic_secret_key(PrivateKey.from_bytes(hexstr_to_bytes(sk)), DEFAULT_HIDDEN_PUZZLE_HASH)
+    signatures: List[G2Element] = []
+    for msg in msg_list:
+        index = msg_list.index(msg)
+        assert bytes(synthetic.get_g1()) == bytes(pk_list[index])
+        signature = AugSchemeMPL.sign(synthetic, msg)
+        assert AugSchemeMPL.verify(pk_list[index], msg, signature)
+        signatures.append(signature)
+    aggsig = AugSchemeMPL.aggregate(signatures)
+    assert AugSchemeMPL.aggregate_verify(pk_list, msg_list, aggsig)
+    return aggsig
+
+
+def create_unsigned_tx(from_pk: str, to_address: str, amount: uint64, fee: int, coins: List):
+    """
+
+    :param from_pk: wallet sk 对应的pk
+    :param to_address: 转账地址
+    :param amount: 数量
+    :param fee: 手续费
+    :param coins: coin输入
+    :return:
+    """
+    to_puzzle_hash = xch_address_to_puzzle_hash(to_address)
+
+    transaction = create_transaction(G1Element.from_bytes(hexstr_to_bytes(from_pk)), to_puzzle_hash, amount, fee, coins)
+    msg_list, pk_list = unsigned_coin_solutions(
+        transaction,
+        bytes.fromhex("ccd5bb71183532bff220ba46c268991a3ff07eb358e8255a65c30a2dce0e5fbb"),
+        11000000000)
+    print(
+        [msg.hex() for msg in msg_list],
+        [bytes(pk).hex() for pk in pk_list])
+
+    return transaction, msg_list, pk_list
+
+
+def create_transaction(pk: G1Element, to_puzzle_hash: str, amount: uint64, fee: int, coins: List):
     outputs = []
 
-    if not to_address:
+    if not to_puzzle_hash:
         raise ValueError(f"Address is null in send list")
     if amount <= 0:
         raise ValueError(f"Amount must greater than 0")
     # address to puzzle hash
-    puzzle_hash = xch_address_to_puzzle_hash(to_address)
-    puzzle_hash = hexstr_to_bytes(puzzle_hash)
+    to_puzzle_hash = hexstr_to_bytes(to_puzzle_hash)
     total_amount = amount + fee
 
-    outputs.append({"puzzle_hash": puzzle_hash, "amount": amount})
+    outputs.append({"puzzle_hash": to_puzzle_hash, "amount": amount})
 
     # 余额判断
     coins = set([Coin.from_json_dict(coin_json) for coin_json in coins])
@@ -66,19 +170,20 @@ def create_unsigned_tx(from_pk: str, to_address: str, amount: uint64,  fee: int,
     if change < 0:
         raise ValueError("Insufficient balance")
 
-    spends: List[CoinSolution] = []
+    transaction: List[CoinSolution] = []
     primary_announcement_hash: Optional[bytes32] = None
 
     for coin in coins:
-        puzzle: Program = puzzle_for_pk(G1Element.from_bytes(hexstr_to_bytes(from_pk)))
+        puzzle: Program = puzzle_for_pk(pk)
 
         if primary_announcement_hash is None:
-            primaries = [{"puzzlehash": puzzle_hash, "amount": amount}]
+            primaries = [{"puzzlehash": to_puzzle_hash, "amount": amount}]
             if change > 0:
-                # todo 获取puzzle hash
-                pass
-                # change_puzzle_hash: bytes32 = get_new_puzzlehash()
-                # primaries.append({"puzzlehash": change_puzzle_hash, "amount": change})
+                # 源码这里是通过index来派生新的wallet私钥，然后转成公钥，最后根据公钥生成puzzle_hash,
+                # 这些会记录在数据库里，然后后面会通过puzzle_hash查找index，然后推出公钥
+                # todo 这里我们直接使用index=0的公钥生成的puzzle_hash, 不知道会不会有问题
+                change_puzzle_hash: bytes32 = create_puzzlehash_for_pk(pk)
+                primaries.append({"puzzlehash": change_puzzle_hash, "amount": change})
             message_list: List[bytes32] = [c.name() for c in coins]
             for primary in primaries:
                 message_list.append(Coin(coin.name(), primary["puzzlehash"], primary["amount"]).name())
@@ -88,13 +193,20 @@ def create_unsigned_tx(from_pk: str, to_address: str, amount: uint64,  fee: int,
         else:
             solution = make_solution(coin_announcements_to_assert=[primary_announcement_hash])
 
-        spends.append(
+        transaction.append(
             CoinSolution(
                 coin, SerializedProgram.from_bytes(bytes(puzzle)), SerializedProgram.from_bytes(bytes(solution))
             )
         )
-    print(spends)
-    return spends
+    if len(transaction) <= 0:
+        raise ValueError("spends is zero")
+    return transaction
+
+
+def secret_key_for_public_key(public_key: G1Element) -> Optional[PrivateKey]:
+    return calculate_synthetic_secret_key(
+        PrivateKey.from_bytes(hexstr_to_bytes("6a2f110a535bf8160d8825570bb63742183ef020c118b2db36bb056070898bf0")),
+        DEFAULT_HIDDEN_PUZZLE_HASH)
 
 
 def make_solution(
@@ -134,17 +246,6 @@ def make_solution(
 
 
 if __name__ == "__main__":
-    """测试私钥
-    Fingerprint: 563730848
-    
-    master private key: 6971ac2114952dfa1e4c8e8053308aa115bd75aa890a7d82a45718f334329191
-    
-    master public key: b2d709611a67e5224cbe9010739b138356e88bbdc4b91a833a489213bab9ad39cfee9c93e0fc3c70a0c4a6b6c5ada8b5
-    
-    Farmer public key (m/12381/8444/0/0): b69b74794fa16c4569af42401615948094ad076795627d88f08e5f1626ec3e2dda47376db481dd3ecdf0585b960b80cf
-    
-    Pool public key (m/12381/8444/1/0): 8b417b4310ecb7fd68e8c39e0fa0e334edd3c8c93eca9985a3f398846f9429142993196416199436718f3ec26609e618
-    """
     print("xch_address:",
           generate_xch_address_from_pk(
               "aaf079d607cabb95c0039c51317cd6e84e66bb6b5c9aecf8fdc4f0ba97c7f2ec8bb2b1831ad3ea0ba8f701a26177e43e"))
@@ -154,10 +255,27 @@ if __name__ == "__main__":
     print("xch_address:",
           puzzle_hash_to_xch_address("0xb4c7ffdfb897a4adf8c05eab6f9211b27bfcb874096ad417013248808fcf8670"))
 
-    create_unsigned_tx(
+    tx, msg_list, pk_list = create_unsigned_tx(
         from_pk="900c653808c7a1227e65af3bd989bc88bf2a30b13531fb2d8159c9321b84379e4c66e5924adf044bf414f80a2def359f",
         to_address="xch1avpafhgdnf4ze55th72y6xw4uuem8dugne8z8e8m86gkxnkhdczs7rtn9z",
-        amount=uint64(1750000000000),
+        amount=uint64(175000000000),
+        fee=0,
+        coins=[{
+            'amount': 1750000000000,
+            'parent_coin_info': '0xe3b0c44298fc1c149afbf4c8996fb92400000000000000000000000000000001',
+            'puzzle_hash': '0xeb03d4dd0d9a6a2cd28bbf944d19d5e733b3b7889e4e23e4fb3e91634ed76e05'
+        }])
+    assert bytes(sign_tx(
+        "6a2f110a535bf8160d8825570bb63742183ef020c118b2db36bb056070898bf0",
+        msg_list,
+        pk_list)).hex() == "b6b0e152c2929b36edd0172dcee8d2a2046adf52459864e8ef4af27cb0e61a4c5493d25aedfb9f08fa571339" \
+                           "f7acd16c15acead762f65d9b2c0caf0e3e1057e3a869b9f471b83ea13203a7a2d166d51afd4cd811add3d611" \
+                           "3c9b45df28523d3f"
+
+    create_signed_tx(
+        sk="6a2f110a535bf8160d8825570bb63742183ef020c118b2db36bb056070898bf0",
+        to_address="xch1avpafhgdnf4ze55th72y6xw4uuem8dugne8z8e8m86gkxnkhdczs7rtn9z",
+        amount=uint64(175000000000),
         fee=0,
         coins=[{
             'amount': 1750000000000,

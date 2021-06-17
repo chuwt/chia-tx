@@ -5,6 +5,7 @@
 """
 
 from chia.util.ints import uint64
+from util.util import generate_xch_address_from_pk, xch_address_to_puzzle_hash, puzzle_hash_to_xch_address
 
 from run import create_signed_tx, create_unsigned_tx, sign_tx
 
@@ -50,7 +51,20 @@ def test_signed_tx(*args):
     return sign_tx_dict
 
 
+def test_address_puzzle_hash():
+    print("xch_address:",
+          generate_xch_address_from_pk(
+              "aaf079d607cabb95c0039c51317cd6e84e66bb6b5c9aecf8fdc4f0ba97c7f2ec8bb2b1831ad3ea0ba8f701a26177e43e"))
+
+    print("puzzle_hash:",
+          xch_address_to_puzzle_hash("xch1knrllhacj7j2m7xqt64klys3kfalewr5p94dg9cpxfygpr70secqdnnl9r"))
+    print("xch_address:",
+          puzzle_hash_to_xch_address("0xb4c7ffdfb897a4adf8c05eab6f9211b27bfcb874096ad417013248808fcf8670"))
+
+
 if __name__ == "__main__":
+    test_address_puzzle_hash()
+
     first_signed_tx = test_create_signed_tx()
     unsigned_tx, msg_list, pk_list = test_create_unsigned_tx()
     second_signed_tx = test_signed_tx(unsigned_tx, msg_list, pk_list)

@@ -10,17 +10,15 @@ from typing import (
     Any,
 )
 
-import time
 from blspy import G1Element, PrivateKey, G2Element, AugSchemeMPL
 
 from chia.util.byte_types import hexstr_to_bytes
-from chia.util.bech32m import decode_puzzle_hash, encode_puzzle_hash
 from chia.consensus.coinbase import create_puzzlehash_for_pk
 from chia.types.blockchain_format.coin import Coin
 from chia.types.blockchain_format.program import Program, SerializedProgram
 from chia.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import puzzle_for_pk
 from chia.types.blockchain_format.sized_bytes import bytes32
-from chia.util.ints import uint64, uint32
+from chia.util.ints import uint64
 from chia.types.coin_solution import CoinSolution
 from chia.util.hash import std_hash
 from chia.wallet.puzzles.puzzle_utils import (
@@ -37,34 +35,25 @@ from chia.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import solution_fo
 from chia.wallet.puzzles.announcement import Announcement
 from chia.types.spend_bundle import SpendBundle
 from chia.wallet.sign_coin_solutions import sign_coin_solutions, unsigned_coin_solutions
-from chia.wallet.transaction_record import TransactionRecord
-from chia.wallet.util.transaction_type import TransactionType
 from chia.consensus.coinbase import DEFAULT_HIDDEN_PUZZLE_HASH
 from chia.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import calculate_synthetic_secret_key
+from util.util import (
+    generate_xch_address_from_pk,
+    puzzle_hash_to_xch_address,
+    xch_address_to_puzzle_hash
+)
 
 
-def generate_xch_address_from_pk(pk: str) -> str:
-    return encode_puzzle_hash(create_puzzlehash_for_pk(G1Element.from_bytes(hexstr_to_bytes(pk))), "xch")
-
-
-def pk_str_to_puzzle_hash(pk: str) -> str:
-    return create_puzzlehash_for_pk(G1Element.from_bytes(hexstr_to_bytes(pk))).hex()
-
-
-def puzzle_hash_to_xch_address(puzzle_hash: str) -> str:
-    return encode_puzzle_hash(hexstr_to_bytes(puzzle_hash), "xch")
-
-
-def xch_address_to_puzzle_hash(xch_address: str) -> str:
-    return decode_puzzle_hash(xch_address).hex()
-
-
-def create_signed_tx(sk: str, to_address: str, amount: uint64,  fee: int, coins: List) -> TransactionRecord:
+def create_signed_tx(sk: str, to_address: str, amount: uint64, fee: int, coins: List) -> dict:
     """
     创建签名后的交易
-    注意: 这里的utxo必须是sk作为私钥进行授权的，不然无法通过签名，
-    todo 当有输入的UTXO有剩余时，将UTXO重新倒入到sk中，暂未测试
-    :param sk: 私钥字符串, 这里的私钥是wallet和index生成的私钥
+
+    注意: 这里的utxo必须是sk作为私钥进行授权的，不然无法通过签名
+    注意2: 官方的walletSk的index使用过后会+1生成，但是此包的index使用的总是index=0的
+    walletSk，望悉知
+
+    当有输入的UTXO有剩余时，将UTXO重新倒入到sk中
+    :param sk: 私钥字符串, 这里的私钥是wallet和index对应的私钥
     :param to_address: 转账地址
     :param amount: 数量
     :param fee: 手续费
@@ -74,40 +63,24 @@ def create_signed_tx(sk: str, to_address: str, amount: uint64,  fee: int, coins:
     to_puzzle_hash = xch_address_to_puzzle_hash(to_address)
 
     synthetic = calculate_synthetic_secret_key(PrivateKey.from_bytes(hexstr_to_bytes(sk)), DEFAULT_HIDDEN_PUZZLE_HASH)
-    print(synthetic)
+    # print(synthetic)
     pk = PrivateKey.from_bytes(hexstr_to_bytes(sk)).get_g1()
 
-    transaction = create_transaction(pk, to_puzzle_hash, amount, fee, coins)
+    transaction = _create_transaction(pk, to_puzzle_hash, amount, fee, coins)
     spend_bundle: SpendBundle = sign_coin_solutions(
         transaction,
         synthetic,
         bytes.fromhex("ccd5bb71183532bff220ba46c268991a3ff07eb358e8255a65c30a2dce0e5fbb"),
         11000000000,
     )
-    print(spend_bundle.to_json_dict())
-
-    return TransactionRecord(
-        confirmed_at_height=uint32(0),
-        created_at_time=uint64(int(time.time())),
-        to_puzzle_hash=hexstr_to_bytes(to_puzzle_hash),
-        amount=uint64(amount),
-        fee_amount=uint64(fee),
-        confirmed=False,
-        sent=uint32(0),
-        spend_bundle=spend_bundle,
-        additions=list(spend_bundle.additions()),
-        removals=list(spend_bundle.removals()),
-        wallet_id=uint32(1),
-        sent_to=[],
-        trade_id=None,
-        type=uint32(TransactionType.OUTGOING_TX.value),
-        name=spend_bundle.name(),
-    )
+    json_dict = spend_bundle.to_json_dict()
+    return json_dict
 
 
-def sign_tx(sk: str, msg_list: List[bytes], pk_list: List[bytes]) -> G2Element:
+def sign_tx(sk: str, unsigned_tx: dict, msg_list: List[bytes], pk_list: List[bytes]) -> dict:
     """
-
+    签名交易
+    :param unsigned_tx:
     :param sk: 是wallet的私钥
     :param msg_list: create_unsigned_tx生成的
     :param pk_list: create_unsigned_tx生成的
@@ -123,12 +96,15 @@ def sign_tx(sk: str, msg_list: List[bytes], pk_list: List[bytes]) -> G2Element:
         signatures.append(signature)
     aggsig = AugSchemeMPL.aggregate(signatures)
     assert AugSchemeMPL.aggregate_verify(pk_list, msg_list, aggsig)
-    return aggsig
+
+    unsigned_tx["aggregated_signature"] = "0x" + bytes(aggsig).hex()
+
+    return unsigned_tx
 
 
 def create_unsigned_tx(from_pk: str, to_address: str, amount: uint64, fee: int, coins: List):
     """
-
+    创建未签名的交易
     :param from_pk: wallet sk 对应的pk
     :param to_address: 转账地址
     :param amount: 数量
@@ -138,19 +114,20 @@ def create_unsigned_tx(from_pk: str, to_address: str, amount: uint64, fee: int, 
     """
     to_puzzle_hash = xch_address_to_puzzle_hash(to_address)
 
-    transaction = create_transaction(G1Element.from_bytes(hexstr_to_bytes(from_pk)), to_puzzle_hash, amount, fee, coins)
+    transaction = _create_transaction(G1Element.from_bytes(hexstr_to_bytes(from_pk)), to_puzzle_hash, amount, fee,
+                                      coins)
     msg_list, pk_list = unsigned_coin_solutions(
         transaction,
         bytes.fromhex("ccd5bb71183532bff220ba46c268991a3ff07eb358e8255a65c30a2dce0e5fbb"),
         11000000000)
-    print(
-        [msg.hex() for msg in msg_list],
-        [bytes(pk).hex() for pk in pk_list])
+    unsigned_tx = {
+        "coin_solutions": [t.to_json_dict() for t in transaction],
+        "aggregated_signature": "",
+    }
+    return unsigned_tx, msg_list, pk_list
 
-    return transaction, msg_list, pk_list
 
-
-def create_transaction(pk: G1Element, to_puzzle_hash: str, amount: uint64, fee: int, coins: List):
+def _create_transaction(pk: G1Element, to_puzzle_hash: str, amount: uint64, fee: int, coins: List):
     outputs = []
 
     if not to_puzzle_hash:
@@ -203,21 +180,15 @@ def create_transaction(pk: G1Element, to_puzzle_hash: str, amount: uint64, fee: 
     return transaction
 
 
-def secret_key_for_public_key(public_key: G1Element) -> Optional[PrivateKey]:
-    return calculate_synthetic_secret_key(
-        PrivateKey.from_bytes(hexstr_to_bytes("6a2f110a535bf8160d8825570bb63742183ef020c118b2db36bb056070898bf0")),
-        DEFAULT_HIDDEN_PUZZLE_HASH)
-
-
 def make_solution(
-    primaries: Optional[List[Dict[str, Any]]] = None,
-    min_time=0,
-    me=None,
-    coin_announcements: Optional[List[bytes32]] = None,
-    coin_announcements_to_assert: Optional[List[bytes32]] = None,
-    puzzle_announcements=None,
-    puzzle_announcements_to_assert=None,
-    fee=0,
+        primaries: Optional[List[Dict[str, Any]]] = None,
+        min_time=0,
+        me=None,
+        coin_announcements: Optional[List[bytes32]] = None,
+        coin_announcements_to_assert: Optional[List[bytes32]] = None,
+        puzzle_announcements=None,
+        puzzle_announcements_to_assert=None,
+        fee=0,
 ) -> Program:
     assert fee >= 0
     condition_list = []

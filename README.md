@@ -20,7 +20,7 @@ chia离线签名，主要用于根据输入，返回未签名的交易
 ```
 despair monster syrup maximum switch shaft monitor smooth cause panel check beef weasel this suffer ritual again donkey dizzy head prize satisfy crater daring
 ```
-里面有80mojo，可以用来测试
+里面有70mojo，可以用来测试
 
 # 部分信息
 - sk ----> pk ----> puzzle_hash <----> xch_address
@@ -49,3 +49,7 @@ despair monster syrup maximum switch shaft monitor smooth cause panel check beef
 已测试通过 √
 ```
 
+# http服务
+```
+使用aiohttp写了个简单的http服务，主要提供上面三个方法的调用
+```

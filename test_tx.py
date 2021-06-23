@@ -7,7 +7,7 @@
 from chia.util.ints import uint64
 from util.util import generate_xch_address_from_pk, xch_address_to_puzzle_hash, puzzle_hash_to_xch_address
 
-from run import create_signed_tx, create_unsigned_tx, sign_tx
+from tx import create_signed_tx, create_unsigned_tx, sign_tx
 
 
 def test_create_signed_tx():

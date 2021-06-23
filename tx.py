@@ -37,11 +37,7 @@ from chia.types.spend_bundle import SpendBundle
 from chia.wallet.sign_coin_solutions import sign_coin_solutions, unsigned_coin_solutions
 from chia.consensus.coinbase import DEFAULT_HIDDEN_PUZZLE_HASH
 from chia.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import calculate_synthetic_secret_key
-from util.util import (
-    generate_xch_address_from_pk,
-    puzzle_hash_to_xch_address,
-    xch_address_to_puzzle_hash
-)
+from util.util import xch_address_to_puzzle_hash
 
 
 def create_signed_tx(sk: str, to_address: str, amount: uint64, fee: int, coins: List) -> dict:
@@ -63,7 +59,6 @@ def create_signed_tx(sk: str, to_address: str, amount: uint64, fee: int, coins: 
     to_puzzle_hash = xch_address_to_puzzle_hash(to_address)
 
     synthetic = calculate_synthetic_secret_key(PrivateKey.from_bytes(hexstr_to_bytes(sk)), DEFAULT_HIDDEN_PUZZLE_HASH)
-    # print(synthetic)
     pk = PrivateKey.from_bytes(hexstr_to_bytes(sk)).get_g1()
 
     transaction = _create_transaction(pk, to_puzzle_hash, amount, fee, coins)

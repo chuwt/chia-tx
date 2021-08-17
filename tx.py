@@ -40,7 +40,7 @@ from chia.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import calculate_s
 from util.util import xch_address_to_puzzle_hash
 
 
-def create_signed_tx(sk: str, to_address: str, amount: uint64, fee: int, coins: List) -> dict:
+def create_signed_tx(sk: str, to_address: str, amount: uint64, fee: int, coins: List) -> (str, dict):
     """
     创建签名后的交易
 
@@ -69,10 +69,11 @@ def create_signed_tx(sk: str, to_address: str, amount: uint64, fee: int, coins: 
         11000000000,
     )
     json_dict = spend_bundle.to_json_dict()
-    return json_dict
+    tx_hash = spend_bundle.name()
+    return str(tx_hash), json_dict
 
 
-def sign_tx(sk: str, unsigned_tx: dict, msg_list: List[bytes], pk_list: List[bytes]) -> dict:
+def sign_tx(sk: str, unsigned_tx: dict, msg_list: List[bytes], pk_list: List[bytes]) -> (str, dict):
     """
     签名交易
     :param unsigned_tx:
@@ -92,9 +93,15 @@ def sign_tx(sk: str, unsigned_tx: dict, msg_list: List[bytes], pk_list: List[byt
     aggsig = AugSchemeMPL.aggregate(signatures)
     assert AugSchemeMPL.aggregate_verify(pk_list, msg_list, aggsig)
 
-    unsigned_tx["aggregated_signature"] = "0x" + bytes(aggsig).hex()
+    signed_tx = {
+        "coin_solutions": unsigned_tx["coin_solutions"],
+        "aggregated_signature": "0x" + bytes(aggsig).hex(),
+    }
 
-    return unsigned_tx
+    coin_solutions = [CoinSolution.from_json_dict(tx) for tx in signed_tx["coin_solutions"]]
+    sb: SpendBundle = SpendBundle(coin_solutions, aggsig)
+
+    return str(sb.name()), signed_tx
 
 
 def create_unsigned_tx(from_pk: str, to_address: str, amount: uint64, fee: int, coins: List):
@@ -111,6 +118,7 @@ def create_unsigned_tx(from_pk: str, to_address: str, amount: uint64, fee: int, 
 
     transaction = _create_transaction(G1Element.from_bytes(hexstr_to_bytes(from_pk)), to_puzzle_hash, amount, fee,
                                       coins)
+    # 11000000000 是clvm消耗，类似eth的gasLimit
     msg_list, pk_list = unsigned_coin_solutions(
         transaction,
         bytes.fromhex("ccd5bb71183532bff220ba46c268991a3ff07eb358e8255a65c30a2dce0e5fbb"),
@@ -209,4 +217,3 @@ def make_solution(
         for announcement_hash in puzzle_announcements_to_assert:
             condition_list.append(make_assert_puzzle_announcement(announcement_hash))
     return solution_for_conditions(condition_list)
-
